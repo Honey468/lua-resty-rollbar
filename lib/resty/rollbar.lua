@@ -1,3 +1,6 @@
+-- A modifed version of:
+-- https://github.com/Scalingo/lua-resty-rollbar
+
 local http = require 'resty.http'
 local json = require 'cjson'
 
@@ -20,6 +23,8 @@ local token = nil
 local environment = 'development'
 -- 	Endpoint is the URL destination for all Rollbar item POST requests.
 local endpoint = 'https://api.rollbar.com/api/1/item/'
+local person_params = {}
+local custom_trace = nil
 
 local rollbar_initted = nil
 
@@ -52,8 +57,8 @@ local function gethostname()
   return ''
 end
 
--- send_request sends the given message at the specified level to Rollbar. This function should be
--- call asynchronously with ngx.timer.at.
+-- send_request is a function which sends the given message at the specified level to Rollbar.
+-- This function should be call asynchronously with ngx.timer.at.
 --
 -- First argument of a function called with ngx.timer.at is premature
 -- (https://github.com/openresty/lua-nginx-module#ngxtimerat)
@@ -64,9 +69,10 @@ local function send_request(_, level, title, stacktrace, request)
       environment = environment,
       body = {
         message = {
-          body = stacktrace,
+          body = custom_trace or stacktrace,
         },
       },
+      person = person_params,
       level = level,
       timestamp = ngx.now(),
       platform = 'linux',
@@ -83,15 +89,13 @@ local function send_request(_, level, title, stacktrace, request)
   }
 
   local httpc = http.new()
-  -- request_uri automatically closes the underlying connection so we don't need to close it by
-  -- ourselves.
   local res, err = httpc:request_uri(endpoint, {
     method = 'POST',
     headers = {
       ['Content-Type'] = 'application/json',
       ['Accept'] = 'application/json, text/html;q=0.9',
     },
-    ssl_verify = true,
+    ssl_verify = false,
     body = json.encode(body),
   })
   if not res then
@@ -124,13 +128,30 @@ function _M.set_environment(env)
   environment = env
 end
 
+-- Set a user to appear in rollbar.
+function _M.set_person(user)
+  if not user then
+    person_params = nil
+  else
+    person_params = {
+      id = user.id,
+      username = user.username,
+      email = user.email
+    }
+  end
+end
+
+function _M.set_custom_trace(trace)
+  custom_trace = trace
+end
+
 -- set_endpoint sets the endpoint to post items to.
 function _M.set_endpoint(e)
   endpoint = e
 end
 
 -- report sends an error to Rollbar with the given level and title.
--- It fills the other fields using Nginx API for Lua
+-- It fills the other fields using Nginx API for lua
 -- (https://github.com/openresty/lua-nginx-module#nginx-api-for-lua).
 function _M.report(level, title)
   if rollbar_initted == nil then
@@ -167,14 +188,7 @@ function _M.report(level, title)
   end
 
   -- create a light thread to send the HTTP request in background
-  ngx.timer.at(0, send_request, level, title, debug.traceback(), request)
-end
-
-function _M.reset()
-  token = nil
-  environment = 'development'
-  endpoint = 'https://api.rollbar.com/api/1/item/'
-  rollbar_initted = nil
+  ngx.timer.at(0, send_request, level, title,  debug.traceback(), request)
 end
 
 return _M
